@@ -60,6 +60,7 @@ private:
     std::unique_ptr<juce::WebToggleButtonParameterAttachment> bypassAttachment;
 
     std::unique_ptr<juce::WebBrowserComponent> webView;
+    juce::File resourcesDir_;
 
     // Timer for visualizer updates
     class VisualizerTimer : public juce::Timer

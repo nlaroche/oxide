@@ -75,13 +75,50 @@ OxideAudioProcessorEditor::~OxideAudioProcessorEditor()
 
 void OxideAudioProcessorEditor::setupWebView()
 {
-    auto options = juce::WebBrowserComponent::Options{}
+    // Find resources directory
+    auto executableFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    auto executableDir = executableFile.getParentDirectory();
+
+    resourcesDir_ = executableDir.getChildFile("Resources").getChildFile("WebUI");
+    if (!resourcesDir_.isDirectory())
+        resourcesDir_ = executableDir.getChildFile("WebUI");
+    if (!resourcesDir_.isDirectory())
+        resourcesDir_ = executableDir.getParentDirectory().getChildFile("Resources").getChildFile("WebUI");
+
+    DBG("Resources dir: " + resourcesDir_.getFullPathName());
+
+    auto options = juce::WebBrowserComponent::Options()
         .withBackend(juce::WebBrowserComponent::Options::Backend::webview2)
-        .withWinWebView2Options(
-            juce::WebBrowserComponent::Options::WinWebView2{}
-                .withUserDataFolder(juce::File::getSpecialLocation(
-                    juce::File::tempDirectory).getChildFile("Oxide"))
-        )
+        .withNativeIntegrationEnabled()
+        .withResourceProvider(
+            [this](const juce::String& url) -> std::optional<juce::WebBrowserComponent::Resource>
+            {
+                auto path = url;
+                if (path.startsWith("/")) path = path.substring(1);
+                if (path.isEmpty()) path = "index.html";
+
+                auto file = resourcesDir_.getChildFile(path);
+                if (!file.existsAsFile()) return std::nullopt;
+
+                juce::String mimeType = "application/octet-stream";
+                if (path.endsWith(".html")) mimeType = "text/html";
+                else if (path.endsWith(".css")) mimeType = "text/css";
+                else if (path.endsWith(".js")) mimeType = "application/javascript";
+                else if (path.endsWith(".json")) mimeType = "application/json";
+                else if (path.endsWith(".png")) mimeType = "image/png";
+                else if (path.endsWith(".svg")) mimeType = "image/svg+xml";
+                else if (path.endsWith(".woff2")) mimeType = "font/woff2";
+
+                juce::MemoryBlock data;
+                file.loadFileAsData(data);
+
+                return juce::WebBrowserComponent::Resource{
+                    std::vector<std::byte>(
+                        reinterpret_cast<const std::byte*>(data.getData()),
+                        reinterpret_cast<const std::byte*>(data.getData()) + data.getSize()),
+                    mimeType.toStdString()
+                };
+            })
         .withOptionsFrom(*bitcrushRelay)
         .withOptionsFrom(*downsampleRelay)
         .withOptionsFrom(*noiseRelay)
@@ -97,9 +134,16 @@ void OxideAudioProcessorEditor::setupWebView()
         .withOptionsFrom(*mixRelay)
         .withOptionsFrom(*outputRelay)
         .withOptionsFrom(*bypassRelay)
-        .withNativeIntegrationEnabled()
-        .withEventListener("requestVisualizerData", [this](const juce::var&) {
-            // Handled by timer
+        .withEventListener("getActivationStatus", [this](const juce::var&) {
+            juce::DynamicObject::Ptr data = new juce::DynamicObject();
+#if BEATCONNECT_ACTIVATION_ENABLED
+            data->setProperty("isConfigured", processorRef.hasActivationEnabled());
+            data->setProperty("isActivated", false);
+#else
+            data->setProperty("isConfigured", false);
+            data->setProperty("isActivated", false);
+#endif
+            webView->emitEventIfBrowserIsVisible("activationState", juce::var(data.get()));
         })
 #if BEATCONNECT_ACTIVATION_ENABLED
         .withEventListener("activateLicense", [this](const juce::var& data) {
@@ -108,30 +152,24 @@ void OxideAudioProcessorEditor::setupWebView()
         .withEventListener("deactivateLicense", [this](const juce::var& data) {
             handleDeactivateLicense(data);
         })
-        .withEventListener("getActivationStatus", [this](const juce::var&) {
-            handleGetActivationStatus();
-        })
 #endif
-        .withEventListener("getPluginInfo", [this](const juce::var&) {
-            juce::DynamicObject::Ptr info = new juce::DynamicObject();
-            info->setProperty("hasActivation", processorRef.hasActivationEnabled());
-            info->setProperty("pluginId", processorRef.getPluginId());
-            webView->emitEventIfBrowserIsVisible("pluginInfo", juce::var(info.get()));
-        });
+        .withWinWebView2Options(
+            juce::WebBrowserComponent::Options::WinWebView2()
+                .withBackgroundColour(juce::Colour(0xFF0a0a0c))
+                .withStatusBarDisabled()
+                .withUserDataFolder(
+                    juce::File::getSpecialLocation(juce::File::tempDirectory)
+                        .getChildFile("OxideWebView2")));
 
     webView = std::make_unique<juce::WebBrowserComponent>(options);
     addAndMakeVisible(*webView);
 
-    // Load URL based on dev mode
 #if OXIDE_DEV_MODE
     webView->goToURL("http://localhost:5173");
     DBG("Loading dev server at localhost:5173");
-#elif HAS_WEB_UI_DATA
-    // Production: load from binary data
-    webView->goToURL(juce::WebBrowserComponent::getResourceProviderRoot());
-    DBG("Loading from binary data");
 #else
-    DBG("No web UI available - build web-ui first");
+    webView->goToURL(webView->getResourceProviderRoot());
+    DBG("Loading from resource provider");
 #endif
 }
 
